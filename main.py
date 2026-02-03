@@ -33,13 +33,7 @@ def get_meta(type: str, id: str):
     except:
         return None
 
-def parse_size_quality(text):
-    # Cari size pake regex barbar (angka + GB/MB)
-    # Contoh match: "Size 2.29 GiB" atau "2.29 GiB" atau "2.29 GB"
-    size_match = re.search(r'(\d+(\.\d+)?\s*[KMGTP]i?B)', text, re.IGNORECASE)
-    size = size_match.group(1) if size_match else "??"
-    
-    # Deteksi kualitas dari teks baris
+def detect_quality(text):
     text_lower = text.lower()
     q = []
     if "2160p" in text_lower or "4k" in text_lower: q.append("4K")
@@ -49,18 +43,20 @@ def parse_size_quality(text):
     
     if "bluray" in text_lower: q.append("BluRay")
     elif "web-dl" in text_lower or "webdl" in text_lower: q.append("WEB-DL")
+    elif "webrip" in text_lower: q.append("WEBRip")
     elif "hdr" in text_lower: q.append("HDR")
+    elif "cam" in text_lower: q.append("CAM")
+    elif "ts" in text_lower: q.append("TS")
     
-    quality = " ".join(q) if q else "SD"
-    return size, quality
+    return " ".join(q) if q else "SD"
 
 @app.get("/manifest.json")
 def get_manifest():
     return {
-        "id": "org.tpb.v5.debug",
-        "version": "5.0.0",
-        "name": "TPB V5 (Debug)",
-        "description": "Brute force parsing",
+        "id": "org.tpb.v7.final",
+        "version": "7.0.0",
+        "name": "TPB V7 (Perfect Fix)",
+        "description": "Correct Title + Correct Size",
         "types": ["movie", "series"],
         "catalogs": [],
         "resources": ["stream"],
@@ -77,7 +73,6 @@ def get_stream(type: str, id: str):
 
     try:
         safe_query = urllib.parse.quote(query)
-        # Search URL default
         url = f"{TPB_URL}/search/{safe_query}/0/7/0"
         
         headers = {
@@ -88,60 +83,42 @@ def get_stream(type: str, id: str):
         soup = BeautifulSoup(resp.text, 'html.parser')
         streams = []
         
-        # --- DEBUG: Print 1 baris HTML pertama biar ketahuan strukturnya ---
-        first_row = soup.find('tr')
-        if first_row:
-             # Kita print 500 karakter pertama dari baris tabel buat intip
-            print(f"\n🐛 DEBUG HTML ROW: {str(first_row)[:500]}...\n")
-        
         for row in soup.select('tr'):
-            # Kita cari semua kolom (TD)
-            tds = row.find_all('td')
-            
-            # Struktur TPB normal biasanya minimal 2 kolom
-            if len(tds) < 2:
-                continue
-                
-            # Kolom index 1 biasanya Judul + Deskripsi
-            main_col = tds[1]
-            main_text = main_col.get_text(" ", strip=True) # Ambil semua text di kolom itu
-            
             magnet_tag = row.find('a', href=re.compile(r'^magnet:\?'))
             
             if magnet_tag:
-                # 1. Cari Judul (Link pertama di kolom utama yg BUKAN magnet)
+                # 1. Logic Judul
                 title_tag = None
-                for link in main_col.find_all('a'):
+                for link in row.find_all('a'):
                     href = link.get('href', '')
-                    # Judul biasanya link yg ngarah ke /torrent/ atau /description
-                    if 'magnet:' not in href and ('/torrent/' in href or '/description' in href or 'view' in href):
-                        title_tag = link
-                        break
+                    txt = link.get_text(strip=True)
+                    if 'magnet:' in href: continue
+                    if '/user/' in href: continue
+                    if '/browse/' in href: continue 
+                    if len(txt) < 2: continue 
+                    title_tag = link
+                    break
                 
-                # Fallback: Kalo gak nemu link spesifik, ambil link apapun yg teksnya panjang
                 if not title_tag:
-                     for link in main_col.find_all('a'):
-                        if len(link.get_text()) > 5:
-                            title_tag = link
-                            break
+                    title_tag = row.select_one('.detName a')
 
-                file_name = title_tag.get_text(strip=True) if title_tag else "TPB File (Check Debug)"
-                
-                # 2. Parse Size & Quality dari SELURUH teks di kolom itu
-                size, quality = parse_size_quality(main_text)
+                file_name = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
 
-                # 3. Cari Seeders (Cari angka di kolom sebelah kanan)
-                seeders = "?"
-                # Cek kolom index 2 (biasanya seeders)
-                if len(tds) > 2:
-                    txt = tds[2].get_text(strip=True)
-                    if txt.isdigit(): seeders = txt
+                # 2. Logic Size (Full Scan)
+                row_text = row.get_text(" ", strip=True)
+                size_match = re.search(r'(\d+(?:\.\d+)?\s*[KMGTP]i?B)', row_text, re.IGNORECASE)
+                size = size_match.group(1) if size_match else "??"
                 
-                # Fallback Seeders: Cek kolom terakhir
-                if not seeders.isdigit() and len(tds) > 3:
-                     # Kadang seeders ada di paling belakang (tds[-2])
-                     if tds[-2].get_text(strip=True).isdigit():
-                         seeders = tds[-2].get_text(strip=True)
+                quality = detect_quality(file_name)
+                
+                # 3. Logic Seeders
+                tds = row.find_all('td')
+                seeders = "0"
+                for td in reversed(tds):
+                    txt = td.get_text(strip=True)
+                    if txt.isdigit():
+                        seeders = txt
+                        break
 
                 magnet = magnet_tag['href']
                 hash_match = re.search(r'btih:([a-zA-Z0-9]+)', magnet)
@@ -150,10 +127,12 @@ def get_stream(type: str, id: str):
                     streams.append({
                         "name": f"TPB+ {quality}",
                         "title": f"{file_name}\n👤 {seeders}  💾 {size}",
-                        "infoHash": hash_match.group(1)
+                        "infoHash": hash_match.group(1),
+                        "behaviorHints": {
+                            "bingeGroup": f"tpb-{quality}"
+                        }
                     })
         
-        print(f"✅ Dapet {len(streams)} streams!")
         return {"streams": streams}
 
     except Exception as e:
