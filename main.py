@@ -54,9 +54,9 @@ def detect_quality(text):
 def get_manifest():
     return {
         "id": "org.tpb.v7.final",
-        "version": "7.0.0",
-        "name": "TPB V7 (Perfect Fix)",
-        "description": "Correct Title + Correct Size",
+        "version": "7.1.0",
+        "name": "TPB V7.1 (Regex Shield)",
+        "description": "Correct Title + Perfect Series Filter",
         "types": ["movie", "series"],
         "catalogs": [],
         "resources": ["stream"],
@@ -65,9 +65,19 @@ def get_manifest():
 
 @app.get("/stream/{type}/{id}.json")
 def get_stream(type: str, id: str):
-    imdb_id = id.split(":")[0]
-    query = get_meta(type, imdb_id)
-    if not query: return {"streams": []}
+    # 1. Parsing parameter ID dari Stremio
+    parts = id.split(":")
+    imdb_id = parts[0]
+    
+    is_series = type == "series" and len(parts) >= 3
+    season = int(parts[1]) if is_series else 0
+    episode = int(parts[2]) if is_series else 0
+
+    base_query = get_meta(type, imdb_id)
+    if not base_query: return {"streams": []}
+    
+    # 2. Inject episode ke string pencarian biar query lebih ringan
+    query = f"{base_query} S{season:02d}E{episode:02d}" if is_series else base_query
     
     print(f"🔍 Searching: {query}")
 
@@ -87,7 +97,6 @@ def get_stream(type: str, id: str):
             magnet_tag = row.find('a', href=re.compile(r'^magnet:\?'))
             
             if magnet_tag:
-                # 1. Logic Judul
                 title_tag = None
                 for link in row.find_all('a'):
                     href = link.get('href', '')
@@ -103,15 +112,26 @@ def get_stream(type: str, id: str):
                     title_tag = row.select_one('.detName a')
 
                 file_name = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+                name_upper = file_name.upper()
 
-                # 2. Logic Size (Full Scan)
+                # --- 3. HARD FILTER REGEX SHIELD ---
+                # Blokir file kompilasi/sampah
+                if any(ext in name_upper for ext in [".ZIP", ".RAR", "BATCH", "COMPLETE SEASON", "COMPLETE", "SEASON PACK"]):
+                    continue 
+
+                # Wajib nge-match ID SxxExx
+                if is_series:
+                    pattern = rf"S{season:02d}[^A-Z0-9]*E{episode:02d}"
+                    if not re.search(pattern, name_upper):
+                        continue
+                # --- END FILTER ---
+
                 row_text = row.get_text(" ", strip=True)
                 size_match = re.search(r'(\d+(?:\.\d+)?\s*[KMGTP]i?B)', row_text, re.IGNORECASE)
                 size = size_match.group(1) if size_match else "??"
                 
                 quality = detect_quality(file_name)
                 
-                # 3. Logic Seeders
                 tds = row.find_all('td')
                 seeders = "0"
                 for td in reversed(tds):
